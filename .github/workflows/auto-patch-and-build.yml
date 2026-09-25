@@ -7,26 +7,19 @@ on:
         description: 'Repository to patch'
         required: true
         default: 'https://github.com/Stability-AI/stable-fast-3d.git'
-      max_attempts:
-        description: 'Maximum patch attempts'
-        required: true
-        default: '5'
 
 jobs:
   auto-patch:
     runs-on: ubuntu-22.04
-    strategy:
-      matrix:
-        python-version: ["3.13"]
     
     steps:
     - name: Checkout repository
       uses: actions/checkout@v4
 
-    - name: Set up Python ${{ matrix.python-version }}
+    - name: Set up Python 3.13
       uses: actions/setup-python@v5
       with:
-        python-version: ${{ matrix.python-version }}
+        python-version: "3.13"
 
     - name: Install build dependencies
       run: |
@@ -53,133 +46,19 @@ jobs:
       run: |
         cd target-repo
         mkdir -p ../build-logs
-        
-        # Try to install requirements and capture all errors
-        pip install -r requirements.txt 2>&1 | tee ../build-logs/initial-build.log || true
-        
-        # Check if build succeeded
-        if [ $? -eq 0 ]; then
-          echo "build_success=true" >> $GITHUB_OUTPUT
-        else
-          echo "build_success=false" >> $GITHUB_OUTPUT
-        fi
+        pip install -r requirements.txt 2>&1 | tee ../build-logs/initial-build.log || echo "Build failed as expected"
 
-    - name: Analyze errors and generate patches
-      if: steps.build_attempt.outputs.build_success == 'false'
+    - name: Run Python patcher script
       run: |
+        cp analyze_and_patch.py target-repo/
         cd target-repo
-        
-        # Create analysis script
-        cat > ../analyze_and_patch.py << 'EOF'
-        import os
-        import re
-        import sys
-        
-        def analyze_compilation_errors(log_file):
-            """Analyze compilation errors and identify Python 3.13 incompatibilities"""
-            with open(log_file, 'r') as f:
-                log_content = f.read()
-            
-            # Common Python 3.13 breaking changes
-            patterns = {
-                'Py_TYPE_assignment': r"error: assignment to read-only location.*Py_TYPE",
-                'PyEval_CallObject': r"error: implicit declaration of function 'PyEval_CallObject'",
-                'PyObject_Call': r"error: implicit declaration of function 'PyObject_Call'",
-                'PyUnicode_AsUTF8': r"error: implicit declaration of function 'PyUnicode_AsUTF8'",
-                'PyLong_AsLong': r"error: implicit declaration of function 'PyLong_AsLong'",
-            }
-            
-            issues = []
-            for issue_name, pattern in patterns.items():
-                if re.search(pattern, log_content):
-                    issues.append(issue_name)
-            
-            return issues
-        
-        def generate_patch(file_path, issues):
-            """Generate patch content for identified issues"""
-            with open(file_path, 'r') as f:
-                content = f.read()
-            
-            patched_content = content
-            
-            # Apply fixes for common Python 3.13 issues
-            if 'Py_TYPE_assignment' in issues:
-                # Replace: Py_TYPE(obj) = type;
-                # With: Py_SET_TYPE(obj, type);
-                patched_content = re.sub(
-                    r'Py_TYPE\((\w+)\)\s*=\s*([^;]+);',
-                    r'Py_SET_TYPE(\1, \2);',
-                    patched_content
-                )
-            
-            if 'PyEval_CallObject' in issues:
-                # Replace: PyEval_CallObject(func, args)
-                # With: PyObject_Call(func, args, NULL)
-                patched_content = re.sub(
-                    r'PyEval_CallObject\(([^,]+),\s*([^)]+)\)',
-                    r'PyObject_Call(\1, \2, NULL)',
-                    patched_content
-                )
-            
-            return patched_content
-        
-        def find_cpp_files(directory):
-            """Find all C++ source files"""
-            cpp_files = []
-            for root, dirs, files in os.walk(directory):
-                for file in files:
-                    if file.endswith(('.cpp', '.cu', '.c', '.h', '.hpp')):
-                        cpp_files.append(os.path.join(root, file))
-            return cpp_files
-        
-        # Main execution
-        log_file = '../build-logs/initial-build.log'
-        issues = analyze_compilation_errors(log_file)
-        
-        if not issues:
-            print("No known Python 3.13 issues detected in build log")
-            sys.exit(0)
-        
-        print(f"Detected issues: {issues}")
-        
-        # Find and patch all C++ files
-        cpp_files = find_cpp_files('.')
-        patched_files = []
-        
-        for cpp_file in cpp_files:
-            try:
-                with open(cpp_file, 'r') as f:
-                    original = f.read()
-                
-                patched = generate_patch(cpp_file, issues)
-                
-                if patched != original:
-                    with open(cpp_file, 'w') as f:
-                        f.write(patched)
-                    patched_files.append(cpp_file)
-                    print(f"Patched: {cpp_file}")
-            except Exception as e:
-                print(f"Error processing {cpp_file}: {e}")
-        
-        # Save patch report
-        with open('../build-logs/patch-report.txt', 'w') as f:
-            f.write(f"Issues detected: {', '.join(issues)}\n")
-            f.write(f"Files patched: {len(patched_files)}\n")
-            for pf in patched_files:
-                f.write(f"  - {pf}\n")
-        
-        print(f"\nPatch complete. {len(patched_files)} files modified.")
-        EOF
-        
-        python ../analyze_and_patch.py
+        python analyze_and_patch.py
 
     - name: Attempt rebuild after patching
       id: rebuild
       run: |
         cd target-repo
         pip install -r requirements.txt 2>&1 | tee ../build-logs/rebuild.log || true
-        
         if [ $? -eq 0 ]; then
           echo "rebuild_success=true" >> $GITHUB_OUTPUT
         else
@@ -190,21 +69,16 @@ jobs:
       if: steps.rebuild.outputs.rebuild_success == 'true'
       run: |
         cd target-repo
-        
-        # Build wheels for local C++ extensions
         if [ -d "texture_baker" ]; then
           cd texture_baker
           python setup.py bdist_wheel
           cd ..
         fi
-        
         if [ -d "uv_unwrapper" ]; then
           cd uv_unwrapper
           python setup.py bdist_wheel
           cd ..
         fi
-        
-        # Collect all wheels
         mkdir -p ../wheels
         find . -name "*.whl" -exec cp {} ../wheels/ \;
 
@@ -217,24 +91,12 @@ jobs:
 
     - name: Create GitHub Release
       if: steps.rebuild.outputs.rebuild_success == 'true'
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v2
       with:
         files: wheels/*.whl
         tag_name: v1.0.0-py313
         name: Python 3.13 Compatible Wheels
-        body: |
-          Auto-generated Python 3.13 compatible wheels for Stable Fast 3D.
-          
-          **Build Details:**
-          - Python: 3.13
-          - CUDA: 12.4
-          - OS: Ubuntu 22.04
-          
-          **Installation:**
-```bash
-          pip install https://github.com/${{ github.repository }}/releases/download/v1.0.0-py313/texture_baker-*.whl
-          pip install https://github.com/${{ github.repository }}/releases/download/v1.0.0-py313/uv_unwrapper-*.whl
-```
+        body: "Auto-generated Python 3.13 compatible wheels for Stable Fast 3D.\n\nBuild Details:\n- Python: 3.13\n- CUDA: 12.4\n- OS: Ubuntu 22.04\n\nInstallation:\nDownload the .whl files below and install them in Colab."
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
