@@ -46,6 +46,8 @@ jobs:
       run: |
         cd target-repo
         mkdir -p ../build-logs
+        # Install torch first, as it's required by setup.py but missing from requirements.txt
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
         pip install -r requirements.txt 2>&1 | tee ../build-logs/initial-build.log || echo "Build failed as expected"
 
     - name: Run Python patcher script
@@ -58,6 +60,8 @@ jobs:
       id: rebuild
       run: |
         cd target-repo
+        # Ensure torch is installed before rebuilding
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
         pip install -r requirements.txt 2>&1 | tee ../build-logs/rebuild.log || true
         if [ $? -eq 0 ]; then
           echo "rebuild_success=true" >> $GITHUB_OUTPUT
@@ -69,6 +73,10 @@ jobs:
       if: steps.rebuild.outputs.rebuild_success == 'true'
       run: |
         cd target-repo
+        
+        # Ensure torch is available for setup.py
+        pip install torch torchvision --index-url https://download.pytorch.org/whl/cu124
+        
         if [ -d "texture_baker" ]; then
           cd texture_baker
           python setup.py bdist_wheel
